@@ -1,0 +1,21 @@
+﻿{
+  "name": "jp.ootr.common",
+  "displayName": "ootr's common utils",
+  "version": "0.0.5",
+  "license": "MIT",
+  "unity": "2022.3",
+  "description": "Common utilities for ootr's projects",
+  "author": {
+    "email": "ootr@ootr.jp",
+    "name": "ootr",
+    "url": "https://github.com/o-tr"
+  },
+  "url": "https://github.com/o-tr/jp.ootr.udonlz4/releases/latest/download/release.zip",
+  "vpmDependencies": {
+    "com.vrchat.base": "3.6.1",
+    "com.vrchat.worlds": "3.6.1"
+  },
+  "legacyFolders": {
+    "Assets\\jp.ootr\\UdonLZ4": "62aa068ff2db4e6a9f5180b077f17574"
+  }
+}
