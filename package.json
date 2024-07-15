@@ -1,10 +1,10 @@
 ﻿{
-  "name": "jp.ootr.common",
+  "name": "jp.ootr.udonlz4",
   "displayName": "ootr's common utils",
-  "version": "0.0.5",
-  "license": "MIT",
+  "version": "0.0.1",
+  "license": "BSD-2-Clause",
   "unity": "2022.3",
-  "description": "Common utilities for ootr's projects",
+  "description": "LZ4 parser for Udon",
   "author": {
     "email": "ootr@ootr.jp",
     "name": "ootr",
