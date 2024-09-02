@@ -15,8 +15,8 @@
   "licensesUrl": "https://github.com/o-tr/jp.ootr.udonlz4/blob/release/LICENSE",
   "documentationUrl": "https://docs.ootr.jp/",
   "vpmDependencies": {
-    "com.vrchat.base": "3.6.1",
-    "com.vrchat.worlds": "3.6.1"
+    "com.vrchat.base": "^3.6.1",
+    "com.vrchat.worlds": "^3.6.1"
   },
   "legacyFolders": {
     "Assets\\jp.ootr\\UdonLZ4": "62aa068ff2db4e6a9f5180b077f17574"
