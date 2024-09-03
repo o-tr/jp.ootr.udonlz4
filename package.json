@@ -1,7 +1,7 @@
 ﻿{
   "name": "jp.ootr.udon-lz4",
   "displayName": "UdonLZ4",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "license": "BSD-2-Clause",
   "unity": "2022.3",
   "description": "LZ4 parser for Udon",
@@ -11,9 +11,12 @@
     "url": "https://github.com/o-tr"
   },
   "url": "https://github.com/o-tr/jp.ootr.udonlz4/releases/latest/download/release.zip",
+  "changelogUrl": "https://github.com/o-tr/jp.ootr.udonlz4/releases/",
+  "licensesUrl": "https://github.com/o-tr/jp.ootr.udonlz4/blob/release/LICENSE",
+  "documentationUrl": "https://docs.ootr.jp/",
   "vpmDependencies": {
-    "com.vrchat.base": "3.6.1",
-    "com.vrchat.worlds": "3.6.1"
+    "com.vrchat.base": "^3.6.1",
+    "com.vrchat.worlds": "^3.6.1"
   },
   "legacyFolders": {
     "Assets\\jp.ootr\\UdonLZ4": "62aa068ff2db4e6a9f5180b077f17574"
