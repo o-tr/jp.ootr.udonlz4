@@ -1,4 +1,5 @@
 ﻿using System;
+using UdonSharp;
 using UnityEngine;
 using UnityEngine.UI;
 using VRC.SDK3.StringLoading;
@@ -27,7 +28,7 @@ namespace jp.ootr.UdonLZ4
         {
             Debug.Log($"ZipLoader: text-zip loaded successfully from {result.Url}.");
             var data = Convert.FromBase64String(result.Result);
-            lz4.DecompressAsync((ILZ4CallbackReceiver)this, data);
+            lz4.DecompressAsync(this, data);
         }
 
         public override void OnLZ4Decompress(byte[] data)
