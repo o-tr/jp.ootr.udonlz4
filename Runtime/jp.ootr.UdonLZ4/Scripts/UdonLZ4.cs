@@ -42,38 +42,6 @@ namespace jp.ootr.UdonLZ4
         
         private byte[] _lz4DecompressedData = new byte[0];
 
-        public byte[] Decompress(byte[] src, long maxSize = 0)
-        {
-            if (!ValidateData(src, out var contentIndex, out var hasBlockSum, out var hasContentSum,
-                    out var hasContentSize, out var hasDictId, out var maxBlockSize, out var error, out var contentSize))
-            {
-                Debug.LogError("invalid input data");
-                return new byte[0];
-            }
-            
-            if (hasContentSize)
-            {
-                maxSize = contentSize;
-            }
-            
-            // skip checksum
-            contentIndex++;
-
-            if (maxSize == 0)
-            {
-                maxSize = DecompressBound(src, contentIndex, maxBlockSize, hasBlockSum);
-                if (maxSize == 0) return new byte[0];
-            }
-
-            var dist = new byte[maxSize];
-            var size = DecompressFrame(src, dist, contentIndex, hasBlockSum);
-
-            if (size == maxSize) return dist;
-            var tmpArray = new byte[size];
-            Array.Copy(dist, 0, tmpArray, 0, (long)size);
-            return tmpArray;
-        }
-
         public void DecompressAsync(UdonSharpBehaviour self, byte[] src, long maxSize = 0)
         {
             _lz4CallbackReceivers = _lz4CallbackReceivers.Append((LZ4CallbackReceiver)self);
@@ -323,44 +291,6 @@ namespace jp.ootr.UdonLZ4
 
             Debug.LogWarning("invalid block size");
             return 0;
-        }
-
-        private long DecompressFrame(byte[] src, byte[] dist, long sIndex, bool useBlockSum)
-        {
-            long dIndex = 0;
-            // Read blocks.
-            while (true)
-            {
-                var compSize = ReadU32(src, ref sIndex);
-                if (compSize == 0) break;
-                if (useBlockSum)
-                    // TODO: read block checksum
-                    sIndex += 4;
-
-                if ((compSize & BS_UNCOMPRESSED) != 0)
-                {
-                    compSize &= ~BS_UNCOMPRESSED;
-
-                    for (var i = 0; i < compSize; i++) dist[dIndex++] = src[sIndex++];
-                }
-                else
-                {
-                    dIndex = DecompressBlock(src, dist, ref sIndex, compSize, ref dIndex);
-                    sIndex += compSize;
-                }
-            }
-
-            return dIndex;
-        }
-
-        private long DecompressBlock(byte[] src, byte[] dst, ref long sIndex, long sLength, ref long dIndex)
-        {
-            var sEnd = sIndex + sLength;
-            while (sIndex < sEnd)
-                if (DecompressBlockInternal(src, dst, ref sIndex, ref dIndex))
-                    break;
-
-            return dIndex;
         }
 
         private bool DecompressBlockInternal(byte[] src, byte[] dst, ref long sIndex, ref long dIndex)
