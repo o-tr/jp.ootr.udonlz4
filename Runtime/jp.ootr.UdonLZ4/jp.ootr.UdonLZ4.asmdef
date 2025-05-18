@@ -3,7 +3,8 @@
   "references": [
     "UdonSharp.Runtime",
     "VRC.Udon",
-    "VRC.Udon.Serialization.OdinSerializer"
+    "VRC.Udon.Serialization.OdinSerializer",
+    "jp.ootr.common"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],
