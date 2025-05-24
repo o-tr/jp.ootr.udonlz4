@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace jp.ootr.UdonLZ4
 {
-    [UdonBehaviourSyncMode(BehaviourSyncMode.NoVariableSync)]
+    [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
     public class UdonLZ4 : UdonSharpBehaviour
     {
         private const int ASYNC_DELAY = 1;
