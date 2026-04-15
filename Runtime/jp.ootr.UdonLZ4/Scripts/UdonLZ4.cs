@@ -9,7 +9,7 @@ namespace jp.ootr.UdonLZ4
     public class UdonLZ4 : UdonSharpBehaviour
     {
         private const int ASYNC_DELAY = 1;
-        
+
         private const long MIN_MATCH = 4;
 
         private const int FD_BLOCK_CHKSUM = 0b0001_0000;
@@ -25,6 +25,17 @@ namespace jp.ootr.UdonLZ4
         private const int BS_MASK = 7;
 
         private const float MaxFrameTime = 0.005f;
+
+        // Hard cap on output buffer to defend against malicious / corrupted headers
+        // declaring an absurd content size. 256 MiB is large enough for the EIA image
+        // payloads this package is used for.
+        private const long MAX_OUTPUT_SIZE = 256L * 1024 * 1024;
+
+        // Block-decode result codes
+        private const int BLOCK_CONTINUE = 0;
+        private const int BLOCK_END = 1;
+        private const int BLOCK_ERROR = -1;
+
         private readonly long[] _bsMap = { 0, 0, 0, 0, 0x10000, 0x40000, 0x100000, 0x400000 };
         private byte[][] _lz4Buffer = new byte[0][];
 
@@ -39,14 +50,23 @@ namespace jp.ootr.UdonLZ4
         private long _lz4SIndex;
         private long _lz4SLength;
         private float _lz4StartTime;
-        
+
         private bool _lz4IsAsync;
-        
+
         private byte[] _lz4DecompressedData = new byte[0];
+        private DecompressError _lz4LastError = DecompressError.None;
 
         public void DecompressAsync(UdonSharpBehaviour self, byte[] src, long maxSize = 0)
         {
-            _lz4CallbackReceivers = _lz4CallbackReceivers.Append((LZ4CallbackReceiver)self);
+            if (src == null || src.Length == 0)
+            {
+                _lz4LastError = DecompressError.EmptyInput;
+                Debug.LogError("[UdonLZ4] DecompressAsync: empty input");
+                if (self != null) self.SendCustomEventDelayedFrames("OnLZ4DecompressError", ASYNC_DELAY);
+                return;
+            }
+
+            _lz4CallbackReceivers = _lz4CallbackReceivers.Append(self);
             _lz4Buffer = _lz4Buffer.Append(src);
             _lz4MaxSizes = _lz4MaxSizes.Append(maxSize);
             if (_lz4IsAsync)
@@ -69,7 +89,7 @@ namespace jp.ootr.UdonLZ4
             _lz4StartTime = Time.realtimeSinceStartup;
 
             if (!ValidateData(_lz4Buffer[0], out var contentIndex, out var hasBlockSum, out var hasContentSum,
-                    out var hasContentSize, out var hasDictId, out var maxBlockSize, out var error, out var maxContentSize))
+                    out var hasContentSize, out var maxBlockSize, out var error, out var maxContentSize))
             {
                 OnDecompressError(error);
                 return;
@@ -80,7 +100,12 @@ namespace jp.ootr.UdonLZ4
                 _lz4MaxSizes[0] = maxContentSize;
             }
 
-            // skip checksum
+            // skip header checksum byte
+            if (contentIndex + 1 > _lz4Buffer[0].Length)
+            {
+                OnDecompressError(DecompressError.InvalidHeader);
+                return;
+            }
             contentIndex++;
 
             if (_lz4MaxSizes[0] == 0)
@@ -91,6 +116,12 @@ namespace jp.ootr.UdonLZ4
                     OnDecompressError(DecompressError.InvalidBlockSize);
                     return;
                 }
+            }
+
+            if (_lz4MaxSizes[0] < 0 || _lz4MaxSizes[0] > MAX_OUTPUT_SIZE)
+            {
+                OnDecompressError(DecompressError.OutputTooLarge);
+                return;
             }
 
             _lz4Dist = new byte[_lz4MaxSizes[0]];
@@ -110,7 +141,12 @@ namespace jp.ootr.UdonLZ4
 
         private void __DecompressFrameInternalAsync()
         {
-            var compSize = ReadU32(_lz4Buffer[0], ref _lz4SIndex);
+            if (!TryReadU32(_lz4Buffer[0], ref _lz4SIndex, out var compSize))
+            {
+                OnDecompressError(DecompressError.InvalidBlock);
+                return;
+            }
+
             if (compSize == 0)
             {
                 if (_lz4DIndex == _lz4Dist.Length)
@@ -127,12 +163,24 @@ namespace jp.ootr.UdonLZ4
 
             if (_lz4HasBlockSum)
             {
+                if (_lz4SIndex + 4 > _lz4Buffer[0].Length)
+                {
+                    OnDecompressError(DecompressError.InvalidBlock);
+                    return;
+                }
                 _lz4SIndex += 4;
             }
 
             if ((compSize & BS_UNCOMPRESSED) != 0)
             {
                 compSize &= ~BS_UNCOMPRESSED;
+
+                if (_lz4SIndex + compSize > _lz4Buffer[0].Length
+                    || _lz4DIndex + compSize > _lz4Dist.Length)
+                {
+                    OnDecompressError(DecompressError.InvalidBlock);
+                    return;
+                }
 
                 Array.Copy(_lz4Buffer[0], _lz4SIndex, _lz4Dist, _lz4DIndex, compSize);
                 _lz4SIndex += compSize;
@@ -142,6 +190,11 @@ namespace jp.ootr.UdonLZ4
             else
             {
                 _lz4SLength = compSize;
+                if (_lz4SIndex + _lz4SLength > _lz4Buffer[0].Length)
+                {
+                    OnDecompressError(DecompressError.InvalidBlock);
+                    return;
+                }
                 _lz4SEnd = _lz4SIndex + _lz4SLength;
                 _DecompressBlockInternalAsync();
             }
@@ -150,7 +203,7 @@ namespace jp.ootr.UdonLZ4
         public void _DecompressBlockInternalAsync()
         {
             _lz4StartTime = Time.realtimeSinceStartup;
-            
+
             __DecompressBlockInternalAsync();
         }
 
@@ -158,7 +211,13 @@ namespace jp.ootr.UdonLZ4
         {
             while (_lz4SIndex < _lz4SEnd)
             {
-                if (DecompressBlockInternal(_lz4Buffer[0], _lz4Dist, ref _lz4SIndex, ref _lz4DIndex)) break;
+                var status = DecompressBlockInternal(_lz4Buffer[0], _lz4Dist, ref _lz4SIndex, ref _lz4DIndex);
+                if (status == BLOCK_ERROR)
+                {
+                    OnDecompressError(DecompressError.InvalidBlock);
+                    return;
+                }
+                if (status == BLOCK_END) break;
 
                 if (!(Time.realtimeSinceStartup - _lz4StartTime > MaxFrameTime)) continue;
                 SendCustomEventDelayedFrames(nameof(_DecompressBlockInternalAsync), ASYNC_DELAY);
@@ -171,8 +230,15 @@ namespace jp.ootr.UdonLZ4
         private void __DecompressFrameInternalAsyncEnd()
         {
             if (_lz4HasContentSum)
+            {
+                if (_lz4SIndex + 4 > _lz4Buffer[0].Length)
+                {
+                    OnDecompressError(DecompressError.InvalidBlock);
+                    return;
+                }
                 _lz4SIndex += 4;
-            
+            }
+
             if (Time.realtimeSinceStartup - _lz4StartTime > MaxFrameTime)
             {
                 SendCustomEventDelayedFrames(nameof(_DecompressFrameInternalAsync), ASYNC_DELAY);
@@ -181,51 +247,65 @@ namespace jp.ootr.UdonLZ4
 
             __DecompressFrameInternalAsync();
         }
-        
+
         private void OnDecompressSuccess(byte[] result)
         {
+            _lz4LastError = DecompressError.None;
             _lz4CallbackReceivers = _lz4CallbackReceivers.Shift(out var device);
             _lz4DecompressedData = result;
             _lz4Dist = null;
             _lz4Buffer = _lz4Buffer.Shift();
             _lz4MaxSizes = _lz4MaxSizes.Shift();
             if (device != null) device.SendCustomEventDelayedFrames("OnLZ4Decompress", ASYNC_DELAY);
-            SendCustomEventDelayedFrames(nameof(__DecompressItemAsync), ASYNC_DELAY);
+            // Schedule the next item one frame after the receiver wakes up so that
+            // GetDecompressedData() / GetLastError() can be read before the next
+            // item overwrites them.
+            SendCustomEventDelayedFrames(nameof(__DecompressItemAsync), ASYNC_DELAY + 1);
         }
 
         private void OnDecompressError(DecompressError error)
         {
             Debug.LogError($"[UdonLZ4] Failed to decompress: {error}");
+            _lz4LastError = error;
             _lz4CallbackReceivers = _lz4CallbackReceivers.Shift(out var device);
-            if (device != null) device.SendCustomEvent("OnLZ4DecompressError");
             _lz4DecompressedData = null;
             _lz4Dist = null;
             _lz4Buffer = _lz4Buffer.Shift();
             _lz4MaxSizes = _lz4MaxSizes.Shift();
-            SendCustomEventDelayedFrames(nameof(__DecompressItemAsync), ASYNC_DELAY);
+            if (device != null) device.SendCustomEventDelayedFrames("OnLZ4DecompressError", ASYNC_DELAY);
+            SendCustomEventDelayedFrames(nameof(__DecompressItemAsync), ASYNC_DELAY + 1);
         }
 
         private bool ValidateData(byte[] src, out long contentIndex, out bool hasBlockSum, out bool hasContentSum,
-            out bool hasContentSize, out bool hasDictId, out long maxBlockSize, out DecompressError error, out long maxContentSize)
+            out bool hasContentSize, out long maxBlockSize, out DecompressError error, out long maxContentSize)
         {
             contentIndex = -1;
             hasBlockSum = false;
             hasContentSum = false;
             hasContentSize = false;
-            hasDictId = false;
             maxBlockSize = 0;
             maxContentSize = 0;
             error = DecompressError.None;
             long sIndex = 0;
 
-            if (ReadU32(src, ref sIndex) != MAGIC_NUM)
+            if (!TryReadU32(src, ref sIndex, out var magic))
+            {
+                Debug.LogWarning("invalid header (truncated magic)");
+                error = DecompressError.InvalidHeader;
+                return false;
+            }
+            if (magic != MAGIC_NUM)
             {
                 Debug.LogWarning("invalid magic number");
                 error = DecompressError.InvalidMagicNumber;
                 return false;
             }
 
-            var descriptor = src[sIndex++];
+            if (!TryReadByte(src, ref sIndex, out var descriptor))
+            {
+                error = DecompressError.InvalidHeader;
+                return false;
+            }
 
             if ((descriptor & FD_VERSION_MASK) != FD_VERSION)
             {
@@ -237,10 +317,15 @@ namespace jp.ootr.UdonLZ4
             hasBlockSum = (descriptor & FD_BLOCK_CHKSUM) != 0;
             hasContentSum = (descriptor & FD_CONTENT_CHKSUM) != 0;
             hasContentSize = (descriptor & FD_CONTENT_SIZE) != 0;
-            hasDictId = (descriptor & FD_DICT_ID) != 0;
+            var hasDictId = (descriptor & FD_DICT_ID) != 0;
 
-            // Read block size
-            var bsIdx = (src[sIndex++] >> BS_SHIFT) & BS_MASK;
+            // Read block size descriptor
+            if (!TryReadByte(src, ref sIndex, out var bsByte))
+            {
+                error = DecompressError.InvalidHeader;
+                return false;
+            }
+            var bsIdx = (bsByte >> BS_SHIFT) & BS_MASK;
             maxBlockSize = _bsMap[bsIdx];
             if (maxBlockSize == 0)
             {
@@ -251,10 +336,28 @@ namespace jp.ootr.UdonLZ4
 
             if (hasContentSize)
             {
-                maxContentSize = (long)ReadU64(src, ref sIndex);
-                return true;
+                if (!TryReadU64(src, ref sIndex, out var rawContentSize))
+                {
+                    error = DecompressError.InvalidHeader;
+                    return false;
+                }
+                if (rawContentSize > MAX_OUTPUT_SIZE)
+                {
+                    error = DecompressError.OutputTooLarge;
+                    return false;
+                }
+                maxContentSize = (long)rawContentSize;
             }
 
+            if (hasDictId)
+            {
+                if (sIndex + 4 > src.Length)
+                {
+                    error = DecompressError.InvalidHeader;
+                    return false;
+                }
+                sIndex += 4;
+            }
 
             contentIndex = sIndex;
             return true;
@@ -263,48 +366,68 @@ namespace jp.ootr.UdonLZ4
         private long DecompressBound(byte[] src, long sIndex, long maxBlockSize, bool hasBlockSum)
         {
             long maxSize = 0;
-            while (sIndex < src.Length)
+            while (true)
             {
-                var blockSize = ReadU32(src, ref sIndex);
-
-                if ((blockSize & BS_UNCOMPRESSED) != 0)
+                if (!TryReadU32(src, ref sIndex, out var blockSize))
                 {
-                    blockSize &= ~BS_UNCOMPRESSED;
-                    maxSize += blockSize;
-                }
-                else if (blockSize > 0)
-                {
-                    maxSize += maxBlockSize;
+                    Debug.LogWarning("invalid block size (truncated)");
+                    return 0;
                 }
 
                 if (blockSize == 0) return maxSize;
 
+                var realSize = (long)(blockSize & ~BS_UNCOMPRESSED);
+                if ((blockSize & BS_UNCOMPRESSED) != 0)
+                {
+                    maxSize += realSize;
+                }
+                else
+                {
+                    maxSize += maxBlockSize;
+                }
+
+                if (maxSize < 0 || maxSize > MAX_OUTPUT_SIZE)
+                {
+                    Debug.LogWarning("output too large");
+                    return 0;
+                }
+
                 if (hasBlockSum)
-                    // ignore block checksum
+                {
+                    if (sIndex + 4 > src.Length) return 0;
                     sIndex += 4;
+                }
 
-                sIndex += blockSize;
+                if (sIndex + realSize > src.Length) return 0;
+                sIndex += realSize;
             }
-
-            Debug.LogWarning("invalid block size");
-            return 0;
         }
 
-        private bool DecompressBlockInternal(byte[] src, byte[] dst, ref long sIndex, ref long dIndex)
+        private int DecompressBlockInternal(byte[] src, byte[] dst, ref long sIndex, ref long dIndex)
         {
-            var token = src[sIndex++];
+            if (!TryReadByte(src, ref sIndex, out var token)) return BLOCK_ERROR;
 
             long literalCount = token >> 4;
             if (literalCount > 0)
             {
                 if (literalCount == 0xf)
+                {
                     while (true)
                     {
+                        if (sIndex >= _lz4SEnd || sIndex >= src.Length) return BLOCK_ERROR;
                         var lenByte = src[sIndex++];
                         literalCount += lenByte;
-                        if (lenByte != 0xff)
-                            break;
+                        if (literalCount > dst.Length - dIndex) return BLOCK_ERROR;
+                        if (lenByte != 0xff) break;
                     }
+                }
+
+                if (literalCount < 0
+                    || sIndex + literalCount > src.Length
+                    || dIndex + literalCount > dst.Length)
+                {
+                    return BLOCK_ERROR;
+                }
 
                 Array.Copy(src, sIndex, dst, dIndex, literalCount);
                 sIndex += literalCount;
@@ -313,23 +436,34 @@ namespace jp.ootr.UdonLZ4
 
             if (sIndex >= _lz4SEnd)
             {
-                return true;
+                return BLOCK_END;
             }
 
             long mLength = token & 0xf;
 
+            if (sIndex + 2 > _lz4SEnd || sIndex + 2 > src.Length) return BLOCK_ERROR;
             long mOffset = src[sIndex++] | (src[sIndex++] << 8);
 
             if (mLength == 0xf)
+            {
                 while (true)
                 {
+                    if (sIndex >= _lz4SEnd || sIndex >= src.Length) return BLOCK_ERROR;
                     var lenByte = src[sIndex++];
                     mLength += lenByte;
-                    if (lenByte != 0xff)
-                        break;
+                    if (mLength > dst.Length) return BLOCK_ERROR;
+                    if (lenByte != 0xff) break;
                 }
+            }
 
             mLength += MIN_MATCH;
+
+            if (mOffset <= 0
+                || mOffset > dIndex
+                || mLength > dst.Length - dIndex)
+            {
+                return BLOCK_ERROR;
+            }
 
             if (mOffset == 1)
             {
@@ -343,7 +477,7 @@ namespace jp.ootr.UdonLZ4
                     Array.Copy(dst, dIndex, dst, dIndex + filled, copyLength);
                     filled += copyLength;
                 }
-            } 
+            }
             else if (mOffset < mLength)
             {
                 Array.Copy(dst, dIndex - mOffset, dst, dIndex, mOffset);
@@ -354,7 +488,7 @@ namespace jp.ootr.UdonLZ4
                     Array.Copy(dst, dIndex, dst, dIndex + copied, chunk);
                     copied += chunk;
                 }
-            } 
+            }
             else
             {
                 Array.Copy(dst, dIndex - mOffset, dst, dIndex, mLength);
@@ -362,37 +496,63 @@ namespace jp.ootr.UdonLZ4
 
             dIndex += mLength;
 
-            return false;
+            return BLOCK_CONTINUE;
         }
 
+        private static bool TryReadByte(byte[] b, ref long n, out byte value)
+        {
+            if (b == null || n < 0 || n + 1 > b.Length)
+            {
+                value = 0;
+                return false;
+            }
+            value = b[n];
+            n += 1;
+            return true;
+        }
 
-        private static uint ReadU32(byte[] b, ref long n)
+        private static bool TryReadU32(byte[] b, ref long n, out uint value)
         {
-            uint x = 0;
-            x |= (uint)b[n++] << 0;
-            x |= (uint)b[n++] << 8;
-            x |= (uint)b[n++] << 16;
-            x |= (uint)b[n++] << 24;
-            return x;
+            if (b == null || n < 0 || n + 4 > b.Length)
+            {
+                value = 0;
+                return false;
+            }
+            value = (uint)b[n]
+                  | ((uint)b[n + 1] << 8)
+                  | ((uint)b[n + 2] << 16)
+                  | ((uint)b[n + 3] << 24);
+            n += 4;
+            return true;
         }
-        
-        private static ulong ReadU64(byte[] b, ref long n)
+
+        private static bool TryReadU64(byte[] b, ref long n, out ulong value)
         {
-            ulong x = 0;
-            x |= (ulong)b[n++] << 0;
-            x |= (ulong)b[n++] << 8;
-            x |= (ulong)b[n++] << 16;
-            x |= (ulong)b[n++] << 24;
-            x |= (ulong)b[n++] << 32;
-            x |= (ulong)b[n++] << 40;
-            x |= (ulong)b[n++] << 48;
-            x |= (ulong)b[n++] << 56;
-            return x;
+            if (b == null || n < 0 || n + 8 > b.Length)
+            {
+                value = 0;
+                return false;
+            }
+            value = (ulong)b[n]
+                  | ((ulong)b[n + 1] << 8)
+                  | ((ulong)b[n + 2] << 16)
+                  | ((ulong)b[n + 3] << 24)
+                  | ((ulong)b[n + 4] << 32)
+                  | ((ulong)b[n + 5] << 40)
+                  | ((ulong)b[n + 6] << 48)
+                  | ((ulong)b[n + 7] << 56);
+            n += 8;
+            return true;
         }
-        
+
         public byte[] GetDecompressedData()
         {
             return _lz4DecompressedData;
+        }
+
+        public DecompressError GetLastError()
+        {
+            return _lz4LastError;
         }
 
         public void ClearDecompressedData()
