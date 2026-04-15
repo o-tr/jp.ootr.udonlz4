@@ -153,6 +153,19 @@ namespace jp.ootr.UdonLZ4
 
             if (compSize == 0)
             {
+                // Per LZ4 frame spec the content checksum (xxHash32 of the
+                // uncompressed payload) appears ONCE, immediately after the
+                // EndMark. Consume — but do not verify — those 4 bytes here.
+                if (_lz4HasContentSum)
+                {
+                    if (_lz4SIndex + 4 > _lz4Buffer[0].Length)
+                    {
+                        OnDecompressError(DecompressError.InvalidBlock);
+                        return;
+                    }
+                    _lz4SIndex += 4;
+                }
+
                 if (_lz4DIndex == _lz4Dist.Length)
                 {
                     OnDecompressSuccess(_lz4Dist);
@@ -233,16 +246,9 @@ namespace jp.ootr.UdonLZ4
 
         private void __DecompressFrameInternalAsyncEnd()
         {
-            if (_lz4HasContentSum)
-            {
-                if (_lz4SIndex + 4 > _lz4Buffer[0].Length)
-                {
-                    OnDecompressError(DecompressError.InvalidBlock);
-                    return;
-                }
-                _lz4SIndex += 4;
-            }
-
+            // Note: content checksum is intentionally NOT consumed here; per LZ4
+            // frame spec it appears only once after the EndMark, handled in the
+            // compSize == 0 branch of __DecompressFrameInternalAsync.
             if (Time.realtimeSinceStartup - _lz4StartTime > MaxFrameTime)
             {
                 SendCustomEventDelayedFrames(nameof(_DecompressFrameInternalAsync), ASYNC_DELAY);
@@ -562,6 +568,10 @@ namespace jp.ootr.UdonLZ4
             return _lz4DecompressedData;
         }
 
+        // Receivers must read GetDecompressedData() / GetLastError() inside their
+        // OnLZ4Decompress / OnLZ4DecompressError callback (i.e. synchronously,
+        // within the same frame the callback fires). The next queued item begins
+        // processing one frame later and will overwrite these fields.
         public DecompressError GetLastError()
         {
             return _lz4LastError;
