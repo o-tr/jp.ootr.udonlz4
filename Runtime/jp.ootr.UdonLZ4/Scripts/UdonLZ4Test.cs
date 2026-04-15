@@ -31,8 +31,9 @@ namespace jp.ootr.UdonLZ4
             lz4.DecompressAsync(this, data);
         }
 
-        public override void OnLZ4Decompress(byte[] data)
+        public override void OnLZ4Decompress()
         {
+            var data = lz4.GetDecompressedData();
             var texture = new Texture2D(1024, 576);
             texture.LoadRawTextureData(data);
             texture.Apply();
