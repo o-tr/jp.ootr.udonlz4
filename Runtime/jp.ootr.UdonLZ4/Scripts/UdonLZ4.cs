@@ -58,13 +58,11 @@ namespace jp.ootr.UdonLZ4
 
         public void DecompressAsync(UdonSharpBehaviour self, byte[] src, long maxSize = 0)
         {
-            if (src == null || src.Length == 0)
-            {
-                _lz4LastError = DecompressError.EmptyInput;
-                Debug.LogError("[UdonLZ4] DecompressAsync: empty input");
-                if (self != null) self.SendCustomEventDelayedFrames("OnLZ4DecompressError", ASYNC_DELAY);
-                return;
-            }
+            // null is normalized to an empty array so empty/invalid inputs flow
+            // through the queue in FIFO order and surface as a normal error item
+            // in __DecompressItemAsync. Bypassing the queue here would break
+            // ordering for callers that have prior items in flight.
+            if (src == null) src = new byte[0];
 
             _lz4CallbackReceivers = _lz4CallbackReceivers.Append(self);
             _lz4Buffer = _lz4Buffer.Append(src);
@@ -87,6 +85,12 @@ namespace jp.ootr.UdonLZ4
             }
             _lz4IsAsync = true;
             _lz4StartTime = Time.realtimeSinceStartup;
+
+            if (_lz4Buffer[0] == null || _lz4Buffer[0].Length == 0)
+            {
+                OnDecompressError(DecompressError.EmptyInput);
+                return;
+            }
 
             if (!ValidateData(_lz4Buffer[0], out var contentIndex, out var hasBlockSum, out var hasContentSum,
                     out var hasContentSize, out var maxBlockSize, out var error, out var maxContentSize))
@@ -414,7 +418,8 @@ namespace jp.ootr.UdonLZ4
                 {
                     while (true)
                     {
-                        if (sIndex >= _lz4SEnd || sIndex >= src.Length) return BLOCK_ERROR;
+                        // _lz4SEnd <= src.Length is invariant from __DecompressFrameInternalAsync
+                        if (sIndex >= _lz4SEnd) return BLOCK_ERROR;
                         var lenByte = src[sIndex++];
                         literalCount += lenByte;
                         if (literalCount > dst.Length - dIndex) return BLOCK_ERROR;
@@ -423,7 +428,7 @@ namespace jp.ootr.UdonLZ4
                 }
 
                 if (literalCount < 0
-                    || sIndex + literalCount > src.Length
+                    || sIndex + literalCount > _lz4SEnd
                     || dIndex + literalCount > dst.Length)
                 {
                     return BLOCK_ERROR;
@@ -434,24 +439,31 @@ namespace jp.ootr.UdonLZ4
                 dIndex += literalCount;
             }
 
-            if (sIndex >= _lz4SEnd)
+            // After the literal copy sIndex is bounded by _lz4SEnd, so equality
+            // means the last sequence (literals only) just consumed the block.
+            // A strict > would indicate a logic bug elsewhere — surface as error.
+            if (sIndex == _lz4SEnd)
             {
                 return BLOCK_END;
+            }
+            if (sIndex > _lz4SEnd)
+            {
+                return BLOCK_ERROR;
             }
 
             long mLength = token & 0xf;
 
-            if (sIndex + 2 > _lz4SEnd || sIndex + 2 > src.Length) return BLOCK_ERROR;
+            if (sIndex + 2 > _lz4SEnd) return BLOCK_ERROR;
             long mOffset = src[sIndex++] | (src[sIndex++] << 8);
 
             if (mLength == 0xf)
             {
                 while (true)
                 {
-                    if (sIndex >= _lz4SEnd || sIndex >= src.Length) return BLOCK_ERROR;
+                    if (sIndex >= _lz4SEnd) return BLOCK_ERROR;
                     var lenByte = src[sIndex++];
                     mLength += lenByte;
-                    if (mLength > dst.Length) return BLOCK_ERROR;
+                    if (mLength > dst.Length - dIndex) return BLOCK_ERROR;
                     if (lenByte != 0xff) break;
                 }
             }
